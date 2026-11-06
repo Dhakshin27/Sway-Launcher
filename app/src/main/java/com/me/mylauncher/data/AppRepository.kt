@@ -23,6 +23,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import android.graphics.Color
+import android.graphics.drawable.AdaptiveIconDrawable
+import android.graphics.drawable.Drawable
+import android.os.Build
 
 import java.io.ByteArrayOutputStream
 
@@ -176,12 +180,57 @@ class AppRepository private constructor(
 
         scope.launch {
 
+            invalidateOldIconCache()
+
             loadDatabaseIntoMemory()
 
             reconcileInstalledApps()
         }
     }
 
+    //Display icons
+    private fun getLauncherDisplayIcon(
+        activity: LauncherActivityInfo
+    ): Drawable {
+
+        val originalIcon = activity.getIcon(0)
+
+        // Android 13+ supports app-provided monochrome icons.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+
+            val monochrome = (
+                    originalIcon as? AdaptiveIconDrawable
+                    )?.monochrome
+
+            if (monochrome != null) {
+                return monochrome.mutate().apply {
+                    setTint(Color.WHITE)
+                }
+            }
+        }
+
+        // Fallback for apps without a monochrome layer.
+        return originalIcon
+    }
+
+    private fun invalidateOldIconCache() {
+
+        val preferences = context.getSharedPreferences(
+            "launcher_icon_cache",
+            Context.MODE_PRIVATE
+        )
+
+        val currentVersion = 1
+
+        if (preferences.getInt("style_version", 0) != currentVersion) {
+
+            database.clearAllIcons()
+
+            preferences.edit()
+                .putInt("style_version", currentVersion)
+                .apply()
+        }
+    }
     /**
      * Load previously saved apps before querying Android.
      */
@@ -293,6 +342,8 @@ class AppRepository private constructor(
 
         scope.launch {
 
+
+
             try {
 
                 val activity = launcherApps.getActivityList(
@@ -370,7 +421,7 @@ class AppRepository private constructor(
                     cached
                 } else {
 
-                    activity.getIcon(0).toBitmap(
+                    getLauncherDisplayIcon(activity).toBitmap(
                         width = ICON_SIZE,
                         height = ICON_SIZE,
                         config = Bitmap.Config.ARGB_8888
