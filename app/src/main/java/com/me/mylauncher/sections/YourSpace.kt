@@ -1,5 +1,6 @@
 package com.me.mylauncher.sections
 
+import android.content.BroadcastReceiver
 import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
@@ -29,218 +30,163 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.PlatformTextStyle
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.LineHeightStyle
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
-// --------------------------------------------------
-// FORMATTERS
-// --------------------------------------------------
-
-private val TIME_FORMATTER =
-    DateTimeFormatter.ofPattern("HH:mm")
-
-private val DATE_FORMATTER =
-    DateTimeFormatter.ofPattern("EEEE  •  d MMM")
-
-// --------------------------------------------------
-// QUOTES
-// --------------------------------------------------
+private val HOUR_FORMATTER = DateTimeFormatter.ofPattern("HH")
+private val MINUTE_FORMATTER = DateTimeFormatter.ofPattern("mm")
+private val DATE_FORMATTER = DateTimeFormatter.ofPattern("EEEE, d MMMM")
+private val SHORT_DATE_FORMATTER = DateTimeFormatter.ofPattern("EEE, d MMM")
 
 private val quotes = listOf(
-    "CHANGE\nYOUR\nPERSPECTIVE.",
-    "LESS NOISE.\nMORE\nCLARITY.",
-    "BE HERE\nRIGHT\nNOW.",
-    "SIMPLICITY\nIS THE\nULTIMATE FOCUS."
+    "Eliminate\nthe nonessential.",
+    "Precision\nover ornament.",
+    "Signal,\nwithout the noise.",
+    "Form\nfollows intent."
 )
-
-// --------------------------------------------------
-// YOUR SPACE
-// --------------------------------------------------
 
 @Composable
 fun YourSpace(isActive: Boolean = true) {
-
     val context = LocalContext.current
 
-    // Wallpaper preferences
     val preferences = remember(context) {
-        context.getSharedPreferences(
-            "your_space_preferences",
-            Context.MODE_PRIVATE
-        )
+        context.getSharedPreferences("your_space_preferences", Context.MODE_PRIVATE)
     }
 
     var wallpaperUri by remember {
-        mutableStateOf(
-            preferences.getString("wallpaper_uri", null)
-                ?.let(Uri::parse)
-        )
+        mutableStateOf(preferences.getString("wallpaper_uri", null)?.let(Uri::parse))
     }
 
-    // Decode wallpaper off the main thread & cache across pager swipes
-    val wallpaperBitmap by produceState<ImageBitmap?>(
-        initialValue = null,
-        key1 = wallpaperUri
-    ) {
+    val wallpaperBitmap by produceState<ImageBitmap?>(initialValue = null, key1 = wallpaperUri) {
         value = withContext(Dispatchers.IO) {
-            wallpaperUri?.let { uri ->
-                decodeWallpaper(context, uri)
+            wallpaperUri?.let { uri -> decodeWallpaper(context, uri) }
+        }
+    }
+
+    val wallpaperPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+                wallpaperUri = uri
+                preferences.edit().putString("wallpaper_uri", uri.toString()).apply()
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
     }
 
-    // Image picker
-    val wallpaperPicker =
-        rememberLauncherForActivityResult(
-            contract = ActivityResultContracts.OpenDocument()
-        ) { uri ->
-            if (uri != null) {
-                try {
-                    context.contentResolver.takePersistableUriPermission(
-                        uri,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    )
+    val pagerState = rememberPagerState(pageCount = { 2 })
 
-                    wallpaperUri = uri
+    var currentTime by remember { mutableStateOf(LocalDateTime.now()) }
+    var batteryLevel by remember { mutableIntStateOf(getBatteryPercentage(context)) }
 
-                    preferences.edit()
-                        .putString("wallpaper_uri", uri.toString())
-                        .apply()
+    // Event-driven system broadcast receiver (zero polling overhead)
+    DisposableEffect(context) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context?, intent: Intent?) {
+                when (intent?.action) {
+                    Intent.ACTION_TIME_TICK,
+                    Intent.ACTION_TIME_CHANGED,
+                    Intent.ACTION_TIMEZONE_CHANGED -> currentTime = LocalDateTime.now()
 
-                } catch (e: Exception) {
-                    e.printStackTrace()
+                    Intent.ACTION_BATTERY_CHANGED -> {
+                        val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+                        val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+                        if (level >= 0 && scale > 0) batteryLevel = (level * 100) / scale
+                    }
                 }
             }
         }
-
-    // Horizontal pager
-    val pagerState = rememberPagerState(
-        pageCount = { 2 }
-    )
-
-    // Clock
-    var currentTime by remember {
-        mutableStateOf(LocalDateTime.now())
-    }
-
-    // Battery
-    var batteryLevel by remember {
-        mutableIntStateOf(getBatteryPercentage(context))
-    }
-
-    // Update clock and battery at minute boundaries
-    LaunchedEffect(Unit) {
-        while (true) {
-            currentTime = LocalDateTime.now()
-            batteryLevel = getBatteryPercentage(context)
-
-            val remaining = 60_000L - (System.currentTimeMillis() % 60_000L)
-            delay(remaining)
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_TIME_TICK)
+            addAction(Intent.ACTION_TIME_CHANGED)
+            addAction(Intent.ACTION_TIMEZONE_CHANGED)
+            addAction(Intent.ACTION_BATTERY_CHANGED)
         }
+        ContextCompat.registerReceiver(context, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        // Refresh immediately in case we missed ticks while unregistered
+        currentTime = LocalDateTime.now()
+        onDispose { context.unregisterReceiver(receiver) }
     }
 
-    val time = remember(currentTime) {
-        currentTime.format(TIME_FORMATTER)
-    }
-
-    val date = remember(currentTime) {
-        currentTime.format(DATE_FORMATTER).uppercase()
-    }
+    val hourStr = remember(currentTime) { currentTime.format(HOUR_FORMATTER) }
+    val minuteStr = remember(currentTime) { currentTime.format(MINUTE_FORMATTER) }
+    val dateStr = remember(currentTime) { currentTime.format(DATE_FORMATTER) }
+    val shortDateStr = remember(currentTime) { currentTime.format(SHORT_DATE_FORMATTER) }
 
     val greeting = remember(currentTime.hour) {
         when (currentTime.hour) {
-            in 5..11 -> "GOOD MORNING"
-            in 12..16 -> "GOOD AFTERNOON"
-            in 17..21 -> "GOOD EVENING"
-            else -> "QUIET HOURS"
+            in 5..11 -> "Good morning."
+            in 12..16 -> "Good afternoon."
+            in 17..21 -> "Good evening."
+            else -> "Good night."
         }
     }
 
-    // Main container
-    Box(
-        modifier = Modifier.fillMaxSize()
-    ) {
-
+    Box(modifier = Modifier.fillMaxSize()) {
         HorizontalPager(
             state = pagerState,
             modifier = Modifier.fillMaxSize(),
-            pageSpacing = 14.dp,
+            pageSpacing = 12.dp,
             userScrollEnabled = isActive,
             key = { it }
         ) { page ->
-
             when (page) {
-
-                // CLOCK PAGE
                 0 -> ClockPage(
-                    time = time,
-                    date = date,
+                    hour = hourStr,
+                    minute = minuteStr,
+                    date = dateStr,
                     greeting = greeting,
                     batteryLevel = batteryLevel,
                     wallpaperBitmap = wallpaperBitmap,
-                    onSetWallpaper = {
-                        wallpaperPicker.launch(arrayOf("image/*"))
-                    },
-                    onTimeClick = {
-                        openClockApp(context)
-                    },
-                    onDateClick = {
-                        openCalendarApp(context)
-                    }
+                    onSetWallpaper = { wallpaperPicker.launch(arrayOf("image/*")) },
+                    onTimeClick = { openClockApp(context) },
+                    onDateClick = { openCalendarApp(context) }
                 )
-
-                // WALLPAPER PAGE
-                1 -> WallpaperPage(
-                    date = date,
-                    hour = currentTime.hour,
-                    wallpaperBitmap = wallpaperBitmap,
-                    onSetWallpaper = {
-                        wallpaperPicker.launch(
-                            arrayOf("image/*")
-                        )
-                    }
-                )
+                1 -> PersonalDashboard()
             }
         }
 
-        // Page indicators
+        // Page indicator
         Row(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 18.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(bottom = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp)
         ) {
-
             repeat(2) { index ->
-
-                val isSelected =
-                    pagerState.currentPage == index
-
+                val isSelected = pagerState.currentPage == index
                 Box(
                     modifier = Modifier
-                        .height(5.dp)
-                        .width(
-                            if (isSelected) 18.dp else 5.dp
-                        )
+                        .height(2.dp)
+                        .width(if (isSelected) 20.dp else 8.dp)
                         .clip(CircleShape)
                         .background(
-                            if (isSelected)
-                                LauncherColors.Accent
-                            else
-                                LauncherColors.TextSecondary.copy(alpha = 0.35f)
+                            if (isSelected) LauncherColors.DotActive
+                            else LauncherColors.TextPrimary.copy(alpha = 0.25f)
                         )
                 )
             }
@@ -248,14 +194,11 @@ fun YourSpace(isActive: Boolean = true) {
     }
 }
 
-// --------------------------------------------------
-// CLOCK PAGE
-// --------------------------------------------------
-
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ClockPage(
-    time: String,
+    hour: String,
+    minute: String,
     date: String,
     greeting: String,
     batteryLevel: Int,
@@ -264,339 +207,261 @@ private fun ClockPage(
     onTimeClick: () -> Unit,
     onDateClick: () -> Unit
 ) {
-
-    val cardShape = remember {
-        RoundedCornerShape(30.dp)
-    }
-
-    val backgroundBrush = remember {
-        Brush.linearGradient(
-            colors = listOf(
-                Color(0xFF303B33),
-                Color(0xFF1B231E),
-                Color(0xFF101512)
-            )
-        )
-    }
-
-    Box(
+    Column(
         modifier = Modifier
             .fillMaxSize()
-            .clip(cardShape)
-            .background(backgroundBrush)
-            .border(
-                width = 1.dp,
-                color = Color.White.copy(alpha = 0.07f),
-                shape = cardShape
-            )
+            .clip(LauncherColors.OuterFrameShape)
+            .background(LauncherColors.Background)
+            .border(1.dp, LauncherColors.Border, LauncherColors.OuterFrameShape)
     ) {
 
-        if (wallpaperBitmap != null) {
-            Image(
-                bitmap = wallpaperBitmap,
-                contentDescription = "Clock card wallpaper",
-                modifier = Modifier
-                    .fillMaxSize()
-                    .combinedClickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                        onClick = {},
-                        onLongClick = onSetWallpaper
-                    ),
-                contentScale = ContentScale.Crop
-            )
-
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.45f))
-            )
-        }
-
-        // Ambient glow
+        // TOP: wallpaper, inset inside the frame so it reads as a "photo card"
         Box(
             modifier = Modifier
-                .align(Alignment.TopEnd)
-                .offset(x = 70.dp, y = (-50).dp)
-                .size(240.dp)
-                .clip(CircleShape)
-                .background(
-                    Color.White.copy(alpha = 0.03f)
+                .weight(1f)
+                .fillMaxWidth()
+                .padding(start = 10.dp, end = 10.dp, top = 10.dp)
+                .clip(RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp, bottomStart = 8.dp, bottomEnd = 8.dp))
+                .background(LauncherColors.Surface)
+                .combinedClickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = {},
+                    onLongClick = onSetWallpaper
                 )
-        )
-
-        Box(
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .offset(x = (-60).dp, y = 60.dp)
-                .size(180.dp)
-                .clip(CircleShape)
-                .background(
-                    Color.White.copy(alpha = 0.02f)
-                )
-        )
-
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(26.dp)
         ) {
-
-            // Greeting and battery
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-
-                Text(
-                    text = greeting,
-                    color = Color.White.copy(alpha = 0.5f),
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    letterSpacing = 2.5.sp
+            if (wallpaperBitmap != null) {
+                Image(
+                    bitmap = wallpaperBitmap,
+                    contentDescription = "Selected wallpaper",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
                 )
-
-                if (batteryLevel in 0..100) {
-
-                    Box(
-                        modifier = Modifier
-                            .clip(CircleShape)
-                            .background(
-                                LauncherColors.Elevated.copy(alpha = 0.65f)
-                            )
-                            .border(
-                                width = 1.dp,
-                                color = LauncherColors.Border,
-                                shape = CircleShape
-                            )
-                            .padding(
-                                horizontal = 10.dp,
-                                vertical = 4.dp
-                            )
-                    ) {
-
-                        Text(
-                            text = "$batteryLevel%",
-                            color =
-                                if (batteryLevel <= 20)
-                                    Color(0xFFFF6B6B)
-                                else
-                                    Color.White.copy(alpha = 0.75f),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium,
-                            letterSpacing = 0.5.sp
-                        )
-                    }
-                }
             }
-
-            Spacer(
-                modifier = Modifier.weight(1f)
-            )
-
-            // Clock
-            Text(
-                text = time,
-                color = LauncherColors.TextPrimary,
-                fontSize = 92.sp,
-                fontWeight = FontWeight.Light,
-                letterSpacing = (-4).sp,
-                maxLines = 1,
-                modifier = Modifier.clickable(
-                    interactionSource = remember {
-                        MutableInteractionSource()
-                    },
-                    indication = null,
-                    onClick = onTimeClick
-                )
-            )
-
-            Spacer(
-                modifier = Modifier.height(6.dp)
-            )
-
-            // Date
-            Text(
-                text = date,
-                color = LauncherColors.TextSecondary,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium,
-                letterSpacing = 2.5.sp,
-                modifier = Modifier.clickable(
-                    interactionSource = remember {
-                        MutableInteractionSource()
-                    },
-                    indication = null,
-                    onClick = onDateClick
-                )
-            )
-
-            Spacer(
-                modifier = Modifier.weight(1.15f)
-            )
         }
+
+        // BOTTOM: three clear tiers - meta line, time, date
+        ClockPanel(
+            hour = hour,
+            minute = minute,
+            date = date,
+            greeting = greeting,
+            batteryLevel = batteryLevel,
+            onTimeClick = onTimeClick,
+            onDateClick = onDateClick
+        )
     }
 }
 
-// --------------------------------------------------
-// WALLPAPER PAGE
-// --------------------------------------------------
+@Composable
+private fun ClockPanel(
+    hour: String,
+    minute: String,
+    date: String,
+    greeting: String,
+    batteryLevel: Int,
+    onTimeClick: () -> Unit,
+    onDateClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 28.dp, end = 28.dp, top = 20.dp, bottom = 40.dp) // bottom clears page indicator
+    ) {
+
+        // Tier 1: greeting (left) + battery (right)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = greeting,
+                color = LauncherColors.TextSecondary,
+                fontSize = 13.sp,
+                letterSpacing = 0.3.sp
+            )
+            if (batteryLevel in 0..100) {
+                BatteryGauge(batteryLevel)
+            }
+        }
+
+        Spacer(Modifier.height(6.dp))
+
+        // Tier 2: time. One Text with spans, so both parts share the exact same baseline.
+        Text(
+            text = buildAnnotatedString {
+                withStyle(SpanStyle(color = LauncherColors.TextPrimary)) { append(hour) }
+                append("\u2009")
+                withStyle(
+                    SpanStyle(
+                        color = LauncherColors.Accent,
+                        fontStyle = FontStyle.Italic
+                    )
+                ) { append(minute) }
+            },
+            style = TextStyle(
+                fontFamily = LauncherColors.Display,
+                fontWeight = FontWeight.Light,
+                fontSize = 88.sp,
+                lineHeight = 92.sp,
+                letterSpacing = (-3).sp,
+                platformStyle = PlatformTextStyle(includeFontPadding = false),
+                lineHeightStyle = LineHeightStyle(
+                    alignment = LineHeightStyle.Alignment.Center,
+                    trim = LineHeightStyle.Trim.Both
+                )
+            ),
+            maxLines = 1,
+            modifier = Modifier.clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onTimeClick
+            )
+        )
+
+        Spacer(Modifier.height(14.dp))
+
+        // Tier 3: hairline + date
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(LauncherColors.Border)
+        )
+
+        Spacer(Modifier.height(12.dp))
+
+        Text(
+            text = date,
+            color = LauncherColors.TextSecondary,
+            fontSize = 14.sp,
+            letterSpacing = 0.3.sp,
+            modifier = Modifier.clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onDateClick
+            )
+        )
+    }
+}
+
+@Composable
+private fun BatteryGauge(batteryLevel: Int) {
+    val low = batteryLevel <= 20
+    val fillColor = if (low) LauncherColors.Danger else LauncherColors.Accent
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .width(24.dp)
+                .height(3.dp)
+                .clip(CircleShape)
+                .background(LauncherColors.TextPrimary.copy(alpha = 0.18f))
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .fillMaxWidth(batteryLevel / 100f)
+                    .clip(CircleShape)
+                    .background(fillColor)
+            )
+        }
+        Text(
+            text = "$batteryLevel%",
+            color = if (low) LauncherColors.Danger else LauncherColors.TextSecondary,
+            fontSize = 13.sp
+        )
+    }
+}
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun WallpaperPage(
     date: String,
-    hour: Int,
-    wallpaperBitmap: ImageBitmap?,
     onSetWallpaper: () -> Unit
 ) {
-
-    val cardShape = remember {
-        RoundedCornerShape(30.dp)
-    }
-
-    var quoteIndex by remember {
-        mutableIntStateOf(0)
-    }
-
-    val gradientColors = remember(hour) {
-
-        if (hour in 6..18) {
-
-            listOf(
-                Color(0xFF344137),
-                Color(0xFF1B231E),
-                Color(0xFF101512)
-            )
-
-        } else {
-
-            listOf(
-                Color(0xFF29362D),
-                Color(0xFF171F19),
-                Color(0xFF101512)
-            )
-        }
-    }
+    var quoteIndex by remember { mutableIntStateOf(0) }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .clip(cardShape)
-            .background(
-                Brush.linearGradient(gradientColors)
-            )
-            .border(
-                width = 1.dp,
-                color = Color.White.copy(alpha = 0.07f),
-                shape = cardShape
-            )
+            .clip(LauncherColors.OuterFrameShape)
+            .background(LauncherColors.Surface)
+            .border(1.dp, LauncherColors.Border, LauncherColors.OuterFrameShape)
             .combinedClickable(
-                interactionSource = remember {
-                    MutableInteractionSource()
-                },
+                interactionSource = remember { MutableInteractionSource() },
                 indication = null,
-
-                // Normal tap changes quote
-                onClick = {
-                    quoteIndex =
-                        (quoteIndex + 1) % quotes.size
-                },
-
-                // Long press opens image picker
+                onClick = { quoteIndex = (quoteIndex + 1) % quotes.size },
                 onLongClick = onSetWallpaper
             )
     ) {
-
-        // Selected wallpaper
-        if (wallpaperBitmap != null) {
-            Image(
-                bitmap = wallpaperBitmap,
-                contentDescription = "Selected wallpaper",
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop
-            )
-        }
-
-        // Dark overlay for text readability
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Color.Black.copy(alpha = 0.42f)
-                )
-        )
-
-        // Quote content
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(26.dp),
-            verticalArrangement = Arrangement.Center
+                .padding(horizontal = 20.dp, vertical = 24.dp),
+            verticalArrangement = Arrangement.SpaceBetween
         ) {
             QuickContacts()
 
-            Spacer(Modifier.height(32.dp))
-            Text(
-                text = quotes[quoteIndex],
-                color = LauncherColors.TextPrimary,
-                fontSize = 36.sp,
-                lineHeight = 42.sp,
-                fontWeight = FontWeight.Light,
-                letterSpacing = (-0.5).sp
-            )
+            Column(
+                modifier = Modifier.padding(start = 8.dp, end = 8.dp, bottom = 26.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .width(24.dp)
+                            .height(1.dp)
+                            .background(LauncherColors.Accent)
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        text = "${quoteIndex + 1} / ${quotes.size}",
+                        color = LauncherColors.TextSecondary,
+                        fontSize = 12.sp,
+                        letterSpacing = 0.6.sp
+                    )
+                }
 
-            Spacer(
-                modifier = Modifier.height(16.dp)
-            )
+                Spacer(Modifier.height(16.dp))
 
-            Text(
-                text = date,
-                color = Color.White.copy(alpha = 0.65f),
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Medium,
-                letterSpacing = 2.5.sp
-            )
+                Text(
+                    text = quotes[quoteIndex],
+                    color = LauncherColors.TextPrimary,
+                    fontFamily = LauncherColors.Display,
+                    fontWeight = FontWeight.Light,
+                    fontSize = 36.sp,
+                    lineHeight = 42.sp,
+                    letterSpacing = (-0.8).sp
+                )
+
+                Spacer(Modifier.height(14.dp))
+
+                Text(
+                    text = date,
+                    color = LauncherColors.TextTertiary,
+                    fontSize = 12.sp,
+                    letterSpacing = 0.3.sp
+                )
+            }
         }
     }
 }
 
-// --------------------------------------------------
-// WALLPAPER IMAGE DECODER
-// --------------------------------------------------
-
-private fun decodeWallpaper(
-    context: Context,
-    uri: Uri
-): ImageBitmap? {
-
+private fun decodeWallpaper(context: Context, uri: Uri): ImageBitmap? {
     return try {
-
         val resolver = context.contentResolver
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
 
-        val bounds = BitmapFactory.Options().apply {
-            inJustDecodeBounds = true
-        }
-
-        resolver.openInputStream(uri)?.use {
-            BitmapFactory.decodeStream(it, null, bounds)
-        }
-
-        if (
-            bounds.outWidth <= 0 ||
-            bounds.outHeight <= 0
-        ) {
-            return null
-        }
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
 
         var sampleSize = 1
         val maxDimension = 1600
-
-        while (
-            bounds.outWidth / sampleSize > maxDimension ||
-            bounds.outHeight / sampleSize > maxDimension
-        ) {
+        while (bounds.outWidth / sampleSize > maxDimension || bounds.outHeight / sampleSize > maxDimension) {
             sampleSize *= 2
         }
 
@@ -605,87 +470,31 @@ private fun decodeWallpaper(
             inPreferredConfig = Bitmap.Config.RGB_565
         }
 
-        val bitmap = resolver.openInputStream(uri)?.use {
+        resolver.openInputStream(uri)?.use {
             BitmapFactory.decodeStream(it, null, options)
-        }
-
-        bitmap?.asImageBitmap()
-
+        }?.asImageBitmap()
     } catch (e: Exception) {
         e.printStackTrace()
         null
     }
 }
 
-// --------------------------------------------------
-// BATTERY
-// --------------------------------------------------
-
-private fun getBatteryPercentage(
-    context: Context
-): Int {
-
+private fun getBatteryPercentage(context: Context): Int {
     return try {
-
-        val intent = context.registerReceiver(
-            null,
-            IntentFilter(Intent.ACTION_BATTERY_CHANGED)
-        )
-
-        val level = intent?.getIntExtra(
-            BatteryManager.EXTRA_LEVEL,
-            -1
-        ) ?: -1
-
-        val scale = intent?.getIntExtra(
-            BatteryManager.EXTRA_SCALE,
-            -1
-        ) ?: -1
-
-        if (level >= 0 && scale > 0) {
-            (level * 100) / scale
-        } else {
-            -1
-        }
-
+        val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        if (level >= 0 && scale > 0) (level * 100) / scale else -1
     } catch (e: Exception) {
         -1
     }
 }
 
-// --------------------------------------------------
-// OPEN CLOCK APP
-// --------------------------------------------------
-
 private fun openClockApp(context: Context) {
-
-    val intents = listOf(
-        Intent(AlarmClock.ACTION_SHOW_ALARMS),
-        Intent("android.intent.action.SHOW_TIMERS"),
-        Intent(AlarmClock.ACTION_SET_TIMER),
-        Intent(Intent.ACTION_MAIN)
-            .addCategory("android.intent.category.APP_CLOCK")
-    )
-
-    for (intent in intents) {
-        try {
-            intent.addFlags(
-                Intent.FLAG_ACTIVITY_NEW_TASK
-            )
-            context.startActivity(intent)
-            return
-        } catch (_: Exception) {
-            // Try next available Clock action.
-        }
-    }
+    openDeviceClock(context)
 }
 
-// --------------------------------------------------
-// OPEN CALENDAR APP
-// --------------------------------------------------
-
 private fun openCalendarApp(context: Context) {
-
     val timeUri = CalendarContract.CONTENT_URI.buildUpon()
         .appendPath("time")
         .apply { ContentUris.appendId(this, System.currentTimeMillis()) }
@@ -693,21 +502,14 @@ private fun openCalendarApp(context: Context) {
 
     val intents = listOf(
         Intent(Intent.ACTION_VIEW).setData(timeUri),
-        Intent(Intent.ACTION_MAIN)
-            .addCategory(Intent.CATEGORY_APP_CALENDAR),
-        Intent(Intent.ACTION_VIEW)
-            .setData(CalendarContract.CONTENT_URI)
+        Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_APP_CALENDAR),
+        Intent(Intent.ACTION_VIEW).setData(CalendarContract.CONTENT_URI)
     )
-
     for (intent in intents) {
         try {
-            intent.addFlags(
-                Intent.FLAG_ACTIVITY_NEW_TASK
-            )
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             context.startActivity(intent)
             return
-        } catch (_: Exception) {
-            // Try next available Calendar action.
-        }
+        } catch (_: Exception) {}
     }
 }

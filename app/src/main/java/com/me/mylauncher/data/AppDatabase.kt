@@ -82,6 +82,11 @@ class AppDatabase(context: Context) :
         return result
     }
 
+    fun clearAllIcons() {
+        writableDatabase.execSQL(
+            "UPDATE apps SET icon = X''"
+        )
+    }
     /**
      * Insert a new app or update its metadata.
      *

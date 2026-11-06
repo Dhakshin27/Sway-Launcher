@@ -1,30 +1,42 @@
 package com.me.mylauncher.sections
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -34,22 +46,25 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ColorFilter
-import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
@@ -57,6 +72,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.Role
@@ -70,10 +86,15 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.me.mylauncher.components.CardContainer
 import com.me.mylauncher.data.AppRecord
 import com.me.mylauncher.data.LauncherApp
+import kotlin.math.absoluteValue
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.withContext
 
 // ---------------------------------------------------------------------------
@@ -85,25 +106,11 @@ private const val ROWS = 3
 private const val APPS_PER_PAGE = COLUMNS * ROWS
 private const val SEARCH_DEBOUNCE_MS = 150L
 private const val MAX_DOT_PAGES = 8
+private const val PRESSED_SCALE = 0.96f
 
-private object Palette {
 
-    val Background = LauncherColors.Background
-    val SearchField = LauncherColors.Surface
 
-    val TextPrimary = LauncherColors.TextPrimary
-    val TextHint = LauncherColors.TextSecondary
-
-    val IconMuted = LauncherColors.TextSecondary
-
-    val Hairline = LauncherColors.Hairline
-    val CardBorder = LauncherColors.Border
-
-    val DotActive = LauncherColors.DotActive
-    val DotInactive = LauncherColors.DotInactive
-}
 private object Dimens {
-    val ScreenRadius = 30.dp
     val ScreenPaddingH = 16.dp
     val ScreenPaddingV = 18.dp
     val SearchHeight = 50.dp
@@ -114,39 +121,24 @@ private object Dimens {
     val IconSize = 58.dp
 }
 
-// Built once instead of on every recomposition.
-// Restrained graphite surfaces.
-// Small tonal differences create depth without looking colourful.
-private val cardBrushes: List<Brush> = listOf(
-
-    Brush.linearGradient(
-        listOf(
-            Color(0xFF303B33),
-            Color(0xFF1B231E)
-        )
-    ),
-
-    Brush.linearGradient(
-        listOf(
-            Color(0xFF29362D),
-            Color(0xFF1B231E)
-        )
-    ),
-
-    Brush.linearGradient(
-        listOf(
-            Color(0xFF344137),
-            Color(0xFF202A23)
-        )
-    )
+// Hoisted so they're allocated once, not on every recomposition.
+private val CardShape = RoundedCornerShape(Dimens.CardRadius)
+private val SearchShape = RoundedCornerShape(Dimens.SearchRadius)
+private val PressSpec = spring<Float>(stiffness = Spring.StiffnessMedium)
+private val ReleaseSpec = spring<Float>(
+    dampingRatio = Spring.DampingRatioMediumBouncy,
+    stiffness = Spring.StiffnessMedium
 )
-
-private val grayscaleFilter: ColorFilter =
-    ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0f) })
 
 // ---------------------------------------------------------------------------
 // Filtering / sorting (pure function, runs off the main thread)
 // ---------------------------------------------------------------------------
+
+/** Lower-cased strings are computed once per app, not once per comparison. */
+private class Keyed(val app: AppRecord) {
+    val label: String = app.label.lowercase()
+    val pkg: String = app.packageName.lowercase()
+}
 
 /**
  * Empty query  -> most used first, then alphabetical.
@@ -154,29 +146,34 @@ private val grayscaleFilter: ColorFilter =
  *                 matches; most used first inside each group.
  */
 private fun filterAndSort(apps: List<AppRecord>, query: String): List<AppRecord> {
+    val keyed = apps.map(::Keyed)
+
     if (query.isEmpty()) {
-        return apps.sortedWith(
-            compareByDescending<AppRecord> { it.launchCount }
-                .thenBy { it.label.lowercase() }
-        )
+        return keyed
+            .sortedWith(
+                compareByDescending<Keyed> { it.app.launchCount }
+                    .thenBy { it.label }
+            )
+            .map { it.app }
     }
 
-    fun rank(app: AppRecord): Int = when {
-        app.label.startsWith(query, ignoreCase = true) -> 0
-        app.label.contains(query, ignoreCase = true) -> 1
-        app.packageName.contains(query, ignoreCase = true) -> 2
+    val q = query.lowercase()
+
+    fun rank(k: Keyed): Int = when {
+        k.label.startsWith(q) -> 0
+        k.label.contains(q) -> 1
+        k.pkg.contains(q) -> 2
         else -> -1
     }
 
-    return apps
-        .map { it to rank(it) }
-        .filter { it.second >= 0 }
+    return keyed
+        .mapNotNull { k -> rank(k).takeIf { it >= 0 }?.let { k to it } }
         .sortedWith(
-            compareBy<Pair<AppRecord, Int>> { it.second }
-                .thenByDescending { it.first.launchCount }
-                .thenBy { it.first.label.lowercase() }
+            compareBy<Pair<Keyed, Int>> { it.second }
+                .thenByDescending { it.first.app.launchCount }
+                .thenBy { it.first.label }
         )
-        .map { it.first }
+        .map { it.first.app }
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +182,11 @@ private fun filterAndSort(apps: List<AppRecord>, query: String): List<AppRecord>
 
 @Composable
 fun YourApps(isActive: Boolean = true) {
+    val density = LocalDensity.current
+    // Grabbing the insets object does not read the animating value; we read it
+    // later inside graphicsLayer so keyboard animation never recomposes this screen.
+    val imeInsets = WindowInsets.ime
+
     val context = LocalContext.current
     val repository = remember(context) {
         (context.applicationContext as LauncherApp).appRepository
@@ -194,13 +196,19 @@ fun YourApps(isActive: Boolean = true) {
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
 
-    var searchQuery by remember { mutableStateOf("") }
+    // Held as a State object and only read inside SearchBar / snapshotFlow, so
+    // typing doesn't recompose the pager or the grid.
+    val searchQuery = remember { mutableStateOf("") }
     var debouncedQuery by remember { mutableStateOf("") }
 
     // Debounce typing, but apply clearing instantly.
-    LaunchedEffect(searchQuery) {
-        if (searchQuery.isNotEmpty()) delay(SEARCH_DEBOUNCE_MS)
-        debouncedQuery = searchQuery.trim()
+    LaunchedEffect(Unit) {
+        snapshotFlow { searchQuery.value }
+            .distinctUntilChanged()
+            .collectLatest { q ->
+                if (q.isNotEmpty()) delay(SEARCH_DEBOUNCE_MS)
+                debouncedQuery = q.trim()
+            }
     }
 
     val initialApps = remember { filterAndSort(apps, "") }
@@ -211,14 +219,18 @@ fun YourApps(isActive: Boolean = true) {
     val appPages = remember(visibleApps) { visibleApps.chunked(APPS_PER_PAGE) }
     val pagerState = rememberPagerState(pageCount = { appPages.size })
 
-    // Jump back to the first page only when the *query* changes, not when
-    // icons load or launch counts update.
+    // Jump back to the first page only when the *query* changes.
     LaunchedEffect(debouncedQuery) {
         if (pagerState.currentPage != 0) pagerState.scrollToPage(0)
     }
 
-    // Hide keyboard when the user swipes pages or this section goes off-screen.
-    LaunchedEffect(pagerState.currentPage) { keyboard?.hide() }
+    // Hide keyboard on page swipes (read via snapshotFlow: no recomposition per page).
+    LaunchedEffect(pagerState) {
+        snapshotFlow { pagerState.currentPage }
+            .distinctUntilChanged()
+            .drop(1)
+            .collect { keyboard?.hide() }
+    }
     LaunchedEffect(isActive) {
         if (!isActive) {
             focusManager.clearFocus()
@@ -227,30 +239,18 @@ fun YourApps(isActive: Boolean = true) {
     }
 
     val launchApp: (AppRecord) -> Unit = remember(repository) {
-        { app ->
-            repository.launch(app)
-        }
+        { app -> repository.launch(app) }
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .clip(RoundedCornerShape(Dimens.ScreenRadius))
-            .background(Palette.Background)
-            .padding(horizontal = Dimens.ScreenPaddingH, vertical = Dimens.ScreenPaddingV)
-    ) {
-        SearchBar(
-            query = searchQuery,
-            onQueryChange = { searchQuery = it },
-            onSubmit = {
-                visibleApps.firstOrNull()?.let(launchApp)
-                keyboard?.hide()
-                focusManager.clearFocus()
-            }
+    CardContainer(
+        backgroundColor = LauncherColors.Background,
+        contentPadding = PaddingValues(
+            horizontal = Dimens.ScreenPaddingH,
+            vertical = Dimens.ScreenPaddingV
         )
+    ) {
 
-        Spacer(Modifier.height(14.dp))
-
+        // App grid / empty state takes all available space
         if (appPages.isNotEmpty()) {
             HorizontalPager(
                 state = pagerState,
@@ -263,9 +263,19 @@ fun YourApps(isActive: Boolean = true) {
             ) { page ->
                 AppGridPage(
                     pageApps = appPages[page],
-                    pageIndex = page,
                     enabled = isActive,
-                    onLaunch = launchApp
+                    onLaunch = launchApp,
+                    // Subtle depth while swiping. Read in the draw phase only.
+                    modifier = Modifier.graphicsLayer {
+                        val offset = ((pagerState.currentPage - page) +
+                                pagerState.currentPageOffsetFraction)
+                            .absoluteValue
+                            .coerceIn(0f, 1f)
+                        alpha = 1f - 0.45f * offset
+                        val s = 1f - 0.05f * offset
+                        scaleX = s
+                        scaleY = s
+                    }
                 )
             }
         } else {
@@ -280,13 +290,35 @@ fun YourApps(isActive: Boolean = true) {
             )
         }
 
-        if (appPages.size > 1) {
-            Spacer(Modifier.height(14.dp))
-            PageIndicator(
-                pageCount = appPages.size,
-                currentPage = pagerState.currentPage
-            )
+        // Page indicator (animates in/out as search results change)
+        AnimatedVisibility(
+            visible = appPages.size > 1,
+            enter = fadeIn(tween(180)) + expandVertically(tween(180)),
+            exit = fadeOut(tween(120)) + shrinkVertically(tween(120))
+        ) {
+            Column {
+                Spacer(Modifier.height(14.dp))
+                PageIndicator(
+                    pageCount = appPages.size,
+                    pagerState = pagerState
+                )
+            }
         }
+
+        // Bottom search bar
+        Spacer(Modifier.height(14.dp))
+
+        SearchBar(
+            query = searchQuery,
+            onSubmit = {
+                visibleApps.firstOrNull()?.let(launchApp)
+                keyboard?.hide()
+                focusManager.clearFocus()
+            },
+            modifier = Modifier.graphicsLayer {
+                translationY = -imeInsets.getBottom(density).toFloat()
+            }
+        )
     }
 }
 
@@ -296,42 +328,60 @@ fun YourApps(isActive: Boolean = true) {
 
 @Composable
 private fun SearchBar(
-    query: String,
-    onQueryChange: (String) -> Unit,
+    query: MutableState<String>,
     onSubmit: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val focusRequester = remember { FocusRequester() }
-    val shape = RoundedCornerShape(Dimens.SearchRadius)
+    var focused by remember { mutableStateOf(false) }
+    val focusProgress by animateFloatAsState(
+        targetValue = if (focused) 1f else 0f,
+        animationSpec = tween(180),
+        label = "searchFocus"
+    )
+
+    val text = query.value
 
     Row(
         modifier = modifier
             .fillMaxWidth()
             .height(Dimens.SearchHeight)
-            .clip(shape)
-            .background(Palette.SearchField)
-            .border(1.dp, Palette.Hairline, shape)
+            .clip(SearchShape)
+            .background(LauncherColors.Surface)
+            // Focus ring is drawn in the draw phase, so the animation costs no recomposition.
+            .drawBehind {
+                val stroke = 1.dp.toPx()
+                if (focusProgress > 0.01f) {
+                    drawRoundRect(
+                        color = LauncherColors.Accent.copy(alpha = 0.55f * focusProgress),
+                        topLeft = Offset(stroke / 2f, stroke / 2f),
+                        size = Size(size.width - stroke, size.height - stroke),
+                        cornerRadius = CornerRadius(Dimens.SearchRadius.toPx()),
+                        style = Stroke(stroke)
+                    )
+                }
+            }
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) { focusRequester.requestFocus() }
             .padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         SearchGlyph(
-            modifier = Modifier
-                .size(18.dp)
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null
-                ) { focusRequester.requestFocus() },
-            color = Palette.IconMuted
+            modifier = Modifier.size(18.dp),
+            color = LauncherColors.TextSecondary
         )
 
         Spacer(Modifier.width(12.dp))
 
         BasicTextField(
-            value = query,
-            onValueChange = onQueryChange,
+            value = text,
+            onValueChange = { query.value = it },
             modifier = Modifier
                 .weight(1f)
-                .focusRequester(focusRequester),
+                .focusRequester(focusRequester)
+                .onFocusChanged { focused = it.isFocused },
             singleLine = true,
             textStyle = TextStyle(
                 color = LauncherColors.TextPrimary,
@@ -347,10 +397,10 @@ private fun SearchBar(
             keyboardActions = KeyboardActions(onSearch = { onSubmit() }),
             decorationBox = { innerTextField ->
                 Box(contentAlignment = Alignment.CenterStart) {
-                    if (query.isEmpty()) {
+                    if (text.isEmpty()) {
                         Text(
                             text = "Search apps",
-                            color = Palette.TextHint,
+                            color = LauncherColors.TextSecondary,
                             fontSize = 15.sp
                         )
                     }
@@ -359,14 +409,18 @@ private fun SearchBar(
             }
         )
 
-        if (query.isNotEmpty()) {
+        AnimatedVisibility(
+            visible = text.isNotEmpty(),
+            enter = fadeIn(tween(120)) + scaleIn(tween(120), initialScale = 0.7f),
+            exit = fadeOut(tween(90)) + scaleOut(tween(90), targetScale = 0.7f)
+        ) {
             Box(
                 modifier = Modifier
                     .size(24.dp)
                     .clip(CircleShape)
                     .background(LauncherColors.Elevated)
                     .semantics { contentDescription = "Clear search" }
-                    .clickable(role = Role.Button) { onQueryChange("") },
+                    .clickable(role = Role.Button) { query.value = "" },
                 contentAlignment = Alignment.Center
             ) {
                 CloseGlyph(
@@ -413,7 +467,6 @@ private fun CloseGlyph(modifier: Modifier, color: Color) {
 @Composable
 private fun AppGridPage(
     pageApps: List<AppRecord>,
-    pageIndex: Int,
     enabled: Boolean,
     onLaunch: (AppRecord) -> Unit,
     modifier: Modifier = Modifier
@@ -431,19 +484,16 @@ private fun AppGridPage(
                 horizontalArrangement = Arrangement.spacedBy(Dimens.GridSpacing)
             ) {
                 repeat(COLUMNS) { col ->
-                    val indexInPage = row * COLUMNS + col
-                    val app = pageApps.getOrNull(indexInPage)
+                    val app = pageApps.getOrNull(row * COLUMNS + col)
                     val slotModifier = Modifier
                         .weight(1f)
                         .fillMaxHeight()
 
                     if (app != null) {
-                        val globalIndex = pageIndex * APPS_PER_PAGE + indexInPage
                         AppCard(
                             app = app,
-                            brush = cardBrushes[globalIndex % cardBrushes.size],
                             enabled = enabled,
-                            onClick = { onLaunch(app) },
+                            onLaunch = onLaunch,
                             modifier = slotModifier
                         )
                     } else {
@@ -462,43 +512,50 @@ private fun AppGridPage(
 @Composable
 private fun AppCard(
     app: AppRecord,
-    brush: Brush,
     enabled: Boolean,
-    onClick: () -> Unit,
+    onLaunch: (AppRecord) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val bitmap by app.icon.collectAsState()
     val imageBitmap = remember(bitmap) { bitmap?.asImageBitmap() }
 
     val interactionSource = remember { MutableInteractionSource() }
-    val pressed by interactionSource.collectIsPressedAsState()
-    val scale by animateFloatAsState(
-        targetValue = if (pressed) 0.96f else 1f,
-        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
-        label = "cardScale"
-    )
 
-    val shape = RoundedCornerShape(Dimens.CardRadius)
+    // Press feedback driven by an Animatable and read in graphicsLayer:
+    // pressing a card no longer recomposes it, it only re-runs the draw phase.
+    val scale = remember { Animatable(1f) }
+    LaunchedEffect(interactionSource) {
+        interactionSource.interactions.collectLatest { interaction ->
+            when (interaction) {
+                is PressInteraction.Press -> scale.animateTo(PRESSED_SCALE, PressSpec)
+                is PressInteraction.Release,
+                is PressInteraction.Cancel -> scale.animateTo(1f, ReleaseSpec)
+            }
+        }
+    }
+
+    // Icons that arrive late fade in; icons already loaded appear instantly.
+    val iconAlpha = remember { Animatable(if (imageBitmap != null) 1f else 0f) }
+    LaunchedEffect(imageBitmap != null) {
+        if (imageBitmap != null && iconAlpha.value < 1f) {
+            iconAlpha.animateTo(1f, tween(200))
+        }
+    }
 
     Column(
         modifier = modifier
             .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
+                scaleX = scale.value
+                scaleY = scale.value
             }
-            .clip(shape)
-            .background(brush)
-            .border(
-                width = 0.7.dp,
-                color = Color.White.copy(alpha = 0.055f),
-                shape = shape
-            )
+            // background(shape) draws the rounded fill directly, no extra clip layer needed.
+            .background(LauncherColors.Elevated, CardShape)
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,
                 enabled = enabled,
                 role = Role.Button,
-                onClick = onClick
+                onClick = { onLaunch(app) }
             )
             .padding(horizontal = 12.dp, vertical = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -507,10 +564,11 @@ private fun AppCard(
         if (imageBitmap != null) {
             Image(
                 bitmap = imageBitmap,
-                contentDescription = null, // the label below already names the app
-                modifier = Modifier.size(Dimens.IconSize),
-                contentScale = ContentScale.Fit,
-                colorFilter = grayscaleFilter
+                contentDescription = null,
+                modifier = Modifier
+                    .size(Dimens.IconSize)
+                    .graphicsLayer { alpha = iconAlpha.value },
+                contentScale = ContentScale.Fit
             )
         } else {
             Spacer(Modifier.size(Dimens.IconSize))
@@ -520,9 +578,9 @@ private fun AppCard(
 
         Text(
             text = app.label,
-            color = Palette.TextPrimary,
+            color = LauncherColors.TextPrimary,
             fontSize = 14.sp,
-            fontWeight = FontWeight.SemiBold,
+            fontWeight = FontWeight.Medium,
             textAlign = TextAlign.Center,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
@@ -536,10 +594,16 @@ private fun AppCard(
 
 @Composable
 private fun EmptyState(message: String, modifier: Modifier = Modifier) {
-    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+    val alpha = remember { Animatable(0f) }
+    LaunchedEffect(Unit) { alpha.animateTo(1f, tween(220)) }
+
+    Box(
+        modifier = modifier.graphicsLayer { this.alpha = alpha.value },
+        contentAlignment = Alignment.Center
+    ) {
         Text(
             text = message,
-            color = Palette.TextHint,
+            color = LauncherColors.TextSecondary,
             fontSize = 14.sp,
             textAlign = TextAlign.Center,
             maxLines = 2,
@@ -553,12 +617,18 @@ private fun EmptyState(message: String, modifier: Modifier = Modifier) {
 // Page indicator
 // ---------------------------------------------------------------------------
 
+/**
+ * Takes the PagerState and reads currentPage here, so a page change only
+ * recomposes the indicator, not the whole screen.
+ */
 @Composable
 private fun PageIndicator(
     pageCount: Int,
-    currentPage: Int,
+    pagerState: PagerState,
     modifier: Modifier = Modifier
 ) {
+    val currentPage = pagerState.currentPage
+
     Row(
         modifier = modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.Center,
@@ -566,32 +636,38 @@ private fun PageIndicator(
     ) {
         if (pageCount <= MAX_DOT_PAGES) {
             repeat(pageCount) { index ->
-                val selected = index == currentPage
-                val width by animateDpAsState(
-                    targetValue = if (selected) 16.dp else 5.dp,
-                    label = "dotWidth"
-                )
-                val color by animateColorAsState(
-                    targetValue = if (selected) Palette.DotActive else Palette.DotInactive,
-                    label = "dotColor"
-                )
-                Box(
-                    modifier = Modifier
-                        .padding(horizontal = 3.dp)
-                        .height(5.dp)
-                        .width(width)
-                        .clip(CircleShape)
-                        .background(color)
-                )
+                Dot(selected = index == currentPage)
             }
         } else {
             // Too many pages for dots to stay meaningful: show a compact counter.
             Text(
                 text = "${currentPage + 1} / $pageCount",
-                color = Color.White.copy(alpha = 0.5f),
+                color = LauncherColors.TextSecondary,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Medium
             )
         }
     }
+}
+
+@Composable
+private fun Dot(selected: Boolean) {
+    val width by animateDpAsState(
+        targetValue = if (selected) 16.dp else 5.dp,
+        animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+        label = "dotWidth"
+    )
+    val color by animateColorAsState(
+        targetValue = if (selected) LauncherColors.DotActive else LauncherColors.DotInactive,
+        animationSpec = tween(180),
+        label = "dotColor"
+    )
+    Box(
+        modifier = Modifier
+            .padding(horizontal = 3.dp)
+            .height(5.dp)
+            .width(width)
+            .clip(CircleShape)
+            .background(color)
+    )
 }

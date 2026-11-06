@@ -9,6 +9,11 @@
         </intent>
     </queries>
 
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+
     <application
         android:name=".data.LauncherApp"
         android:allowBackup="true"
@@ -20,21 +25,37 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.MyLauncher">
 
+        <service
+            android:name=".sections.PriorityNotificationListener"
+            android:label="Launcher Notifications"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
         <activity
-
             android:name=".MainActivity"
-
             android:exported="true"
             android:label="@string/app_name"
             android:theme="@style/Theme.MyLauncher"
-            android:windowSoftInputMode="adjustNothing">
+            android:windowSoftInputMode="adjustNothing"
+            android:launchMode="singleTask">
+
+            <!-- Android Home launcher -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.HOME" />
                 <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
 
+            <!-- Keep the app accessible from the app drawer -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
         </activity>
 
     </application>
