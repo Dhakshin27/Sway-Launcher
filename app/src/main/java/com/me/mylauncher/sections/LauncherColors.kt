@@ -22,6 +22,7 @@ data class LauncherPalette(
     val onAccent: Color,
     val secondaryAccent: Color,
     val danger: Color
+
 ) {
     val accentSoft get() = accent.copy(alpha = 0.14f)
     val border get() = textPrimary.copy(alpha = 0.07f)

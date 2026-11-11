@@ -82,6 +82,8 @@ class AppRepository private constructor(
     }
 
     private val database = AppDatabase(context)
+    private val iconResolver = IconResolver(context)
+
 
     private val launcherApps =
         context.getSystemService(Context.LAUNCHER_APPS_SERVICE)
@@ -189,19 +191,15 @@ class AppRepository private constructor(
     }
 
     //Display icons
+    // Display icons (inside AppRepository.kt)
     private fun getLauncherDisplayIcon(
         activity: LauncherActivityInfo
     ): Drawable {
-
         val originalIcon = activity.getIcon(0)
 
-        // Android 13+ supports app-provided monochrome icons.
+        // Prefer the app-provided monochrome layer on Android 13+.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-
-            val monochrome = (
-                    originalIcon as? AdaptiveIconDrawable
-                    )?.monochrome
-
+            val monochrome = (originalIcon as? AdaptiveIconDrawable)?.monochrome
             if (monochrome != null) {
                 return monochrome.mutate().apply {
                     setTint(Color.WHITE)
@@ -209,22 +207,33 @@ class AppRepository private constructor(
             }
         }
 
-        // Fallback for apps without a monochrome layer.
-        return originalIcon
+        // Fallback: use the foreground of adaptive icons.
+        val adaptiveForeground = (originalIcon as? AdaptiveIconDrawable)?.foreground
+        if (adaptiveForeground != null) {
+            return adaptiveForeground.mutate().apply {
+                setTint(Color.WHITE)
+            }
+        }
+
+        // Final fallback for regular, non-adaptive icons.
+        return originalIcon.mutate().apply {
+            setTint(Color.WHITE)
+        }
     }
 
     private fun invalidateOldIconCache() {
-
         val preferences = context.getSharedPreferences(
             "launcher_icon_cache",
             Context.MODE_PRIVATE
         )
 
-        val currentVersion = 1
+        // IMPORTANT: Bumped to 6 so SQLite purges the previously saved clipped PNGs!
+        val currentVersion = 6
 
         if (preferences.getInt("style_version", 0) != currentVersion) {
-
             database.clearAllIcons()
+            iconResolver.clearMemoryCache()
+            iconCache.evictAll()
 
             preferences.edit()
                 .putInt("style_version", currentVersion)
@@ -408,30 +417,44 @@ class AppRepository private constructor(
             return
         }
 
+
         val bitmap = withContext(Dispatchers.IO) {
 
             try {
 
-                val cached = iconCache.get(packageName)
+                // 1. Try Lawnicons first.
+                val lawnIcon = iconResolver.resolve(component)
 
-                if (
-                    cached != null &&
-                    existing?.lastUpdateTime == updateTime
-                ) {
-                    cached
+                if (lawnIcon != null) {
+                    lawnIcon
                 } else {
 
-                    getLauncherDisplayIcon(activity).toBitmap(
-                        width = ICON_SIZE,
-                        height = ICON_SIZE,
-                        config = Bitmap.Config.ARGB_8888
-                    )
+                    // 2. If Lawnicons has no matching icon,
+                    // reuse the existing cached Android icon when possible.
+                    val cached = iconCache.get(packageName)
+
+                    if (
+                        cached != null &&
+                        existing?.lastUpdateTime == updateTime
+                    ) {
+                        cached
+                    } else {
+
+                        // 3. Final fallback: normal Android app icon.
+                        getLauncherDisplayIcon(activity).toBitmap(
+                            width = ICON_SIZE,
+                            height = ICON_SIZE,
+                            config = Bitmap.Config.ARGB_8888
+                        )
+                    }
                 }
 
             } catch (_: Exception) {
                 null
             }
+
         } ?: return
+
 
         val iconBytes = withContext(Dispatchers.IO) {
 
