@@ -6,8 +6,6 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.ui.graphics.BlendMode
-import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
@@ -19,9 +17,9 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -66,7 +64,9 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
@@ -90,7 +90,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.me.mylauncher.components.CardContainer
 import com.me.mylauncher.data.AppRecord
-import com.me.mylauncher.data.IconResolver
 import com.me.mylauncher.data.LauncherApp
 import kotlin.math.absoluteValue
 import kotlinx.coroutines.Dispatchers
@@ -109,8 +108,6 @@ private const val ROWS = 3
 private const val APPS_PER_PAGE = COLUMNS * ROWS
 private const val SEARCH_DEBOUNCE_MS = 150L
 private const val MAX_DOT_PAGES = 8
-private const val PRESSED_SCALE = 0.96f
-
 
 private object Dimens {
     val ScreenPaddingH = 16.dp
@@ -126,11 +123,6 @@ private object Dimens {
 // Hoisted so they're allocated once, not on every recomposition.
 private val CardShape = RoundedCornerShape(Dimens.CardRadius)
 private val SearchShape = RoundedCornerShape(Dimens.SearchRadius)
-private val PressSpec = spring<Float>(stiffness = Spring.StiffnessMedium)
-private val ReleaseSpec = spring<Float>(
-    dampingRatio = Spring.DampingRatioMediumBouncy,
-    stiffness = Spring.StiffnessMedium
-)
 
 // ---------------------------------------------------------------------------
 // Filtering / sorting (pure function, runs off the main thread)
@@ -508,7 +500,7 @@ private fun AppGridPage(
 }
 
 // ---------------------------------------------------------------------------
-// App card
+// App card (Matches ScanPayBarSection & MusicSection click effect exactly)
 // ---------------------------------------------------------------------------
 
 @Composable
@@ -521,21 +513,6 @@ private fun AppCard(
     val bitmap by app.icon.collectAsState()
     val imageBitmap = remember(bitmap) { bitmap?.asImageBitmap() }
 
-    val interactionSource = remember { MutableInteractionSource() }
-
-    // Press feedback driven by an Animatable and read in graphicsLayer:
-    // pressing a card no longer recomposes it, it only re-runs the draw phase.
-    val scale = remember { Animatable(1f) }
-    LaunchedEffect(interactionSource) {
-        interactionSource.interactions.collectLatest { interaction ->
-            when (interaction) {
-                is PressInteraction.Press -> scale.animateTo(PRESSED_SCALE, PressSpec)
-                is PressInteraction.Release,
-                is PressInteraction.Cancel -> scale.animateTo(1f, ReleaseSpec)
-            }
-        }
-    }
-
     // Icons that arrive late fade in; icons already loaded appear instantly.
     val iconAlpha = remember { Animatable(if (imageBitmap != null) 1f else 0f) }
     LaunchedEffect(imageBitmap != null) {
@@ -546,15 +523,10 @@ private fun AppCard(
 
     Column(
         modifier = modifier
-            .graphicsLayer {
-                scaleX = scale.value
-                scaleY = scale.value
-            }
-            // background(shape) draws the rounded fill directly, no extra clip layer needed.
-            .background(LauncherColors.Elevated, CardShape)
+            .clip(CardShape)
+            .background(LauncherColors.Elevated)
+            .border(1.dp, LauncherColors.Border, CardShape)
             .clickable(
-                interactionSource = interactionSource,
-                indication = null,
                 enabled = enabled,
                 role = Role.Button,
                 onClick = { onLaunch(app) }
