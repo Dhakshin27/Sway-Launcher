@@ -6,6 +6,8 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
@@ -88,6 +90,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.me.mylauncher.components.CardContainer
 import com.me.mylauncher.data.AppRecord
+import com.me.mylauncher.data.IconResolver
 import com.me.mylauncher.data.LauncherApp
 import kotlin.math.absoluteValue
 import kotlinx.coroutines.Dispatchers
@@ -107,7 +110,6 @@ private const val APPS_PER_PAGE = COLUMNS * ROWS
 private const val SEARCH_DEBOUNCE_MS = 150L
 private const val MAX_DOT_PAGES = 8
 private const val PRESSED_SCALE = 0.96f
-
 
 
 private object Dimens {
@@ -567,8 +569,14 @@ private fun AppCard(
                 contentDescription = null,
                 modifier = Modifier
                     .size(Dimens.IconSize)
-                    .graphicsLayer { alpha = iconAlpha.value },
-                contentScale = ContentScale.Fit
+                    .graphicsLayer {
+                        alpha = iconAlpha.value
+                    },
+                contentScale = ContentScale.Fit,
+                colorFilter = ColorFilter.tint(
+                    color = LauncherColors.Accent,
+                    blendMode = BlendMode.SrcIn
+                )
             )
         } else {
             Spacer(Modifier.size(Dimens.IconSize))
