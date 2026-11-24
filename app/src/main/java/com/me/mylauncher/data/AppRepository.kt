@@ -3,18 +3,22 @@ package com.me.mylauncher.data
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.LauncherActivityInfo
 import android.content.pm.LauncherApps
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Color
+import android.graphics.drawable.AdaptiveIconDrawable
+import android.graphics.drawable.Drawable
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.Process
 import android.os.UserHandle
 import android.util.LruCache
-
 import androidx.core.graphics.drawable.toBitmap
-
+import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -23,12 +27,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import android.graphics.Color
-import android.graphics.drawable.AdaptiveIconDrawable
-import android.graphics.drawable.Drawable
-import android.os.Build
-
-import java.io.ByteArrayOutputStream
 
 private const val ICON_SIZE = 128
 
@@ -38,7 +36,8 @@ class AppRecord(
     val componentName: ComponentName,
     val lastUpdateTime: Long,
     initialIcon: Bitmap?,
-    initialLaunchCount: Int = 0
+    initialLaunchCount: Int = 0,
+    val isSystemApp: Boolean = false
 ) {
 
     private val _icon = MutableStateFlow(initialIcon)
@@ -69,9 +68,7 @@ class AppRepository private constructor(
         private var INSTANCE: AppRepository? = null
 
         fun get(context: Context): AppRepository {
-
             return INSTANCE ?: synchronized(this) {
-
                 INSTANCE ?: AppRepository(
                     context.applicationContext
                 ).also {
@@ -83,7 +80,6 @@ class AppRepository private constructor(
 
     private val database = AppDatabase(context)
     private val iconResolver = IconResolver(context)
-
 
     private val launcherApps =
         context.getSystemService(Context.LAUNCHER_APPS_SERVICE)
@@ -170,7 +166,6 @@ class AppRepository private constructor(
      */
     @Synchronized
     fun start() {
-
         if (started) return
 
         started = true
@@ -181,17 +176,12 @@ class AppRepository private constructor(
         )
 
         scope.launch {
-
             invalidateOldIconCache()
-
             loadDatabaseIntoMemory()
-
             reconcileInstalledApps()
         }
     }
 
-    //Display icons
-    // Display icons (inside AppRepository.kt)
     private fun getLauncherDisplayIcon(
         activity: LauncherActivityInfo
     ): Drawable {
@@ -221,6 +211,23 @@ class AppRepository private constructor(
         }
     }
 
+    private fun isSystemPackage(appInfo: ApplicationInfo): Boolean {
+        val flags = appInfo.flags
+        val isSystem = (flags and ApplicationInfo.FLAG_SYSTEM) != 0
+        val isUpdatedSystem = (flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
+        return isSystem && !isUpdatedSystem
+    }
+
+    private fun isSystemPackageName(packageName: String): Boolean {
+        return try {
+            @Suppress("DEPRECATION")
+            val appInfo = context.packageManager.getApplicationInfo(packageName, 0)
+            isSystemPackage(appInfo)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     private fun invalidateOldIconCache() {
         val preferences = context.getSharedPreferences(
             "launcher_icon_cache",
@@ -240,23 +247,20 @@ class AppRepository private constructor(
                 .apply()
         }
     }
+
     /**
      * Load previously saved apps before querying Android.
      */
     private suspend fun loadDatabaseIntoMemory() {
-
         val storedApps = database.getAllApps()
 
         for (stored in storedApps) {
-
             val bitmap = try {
-
                 BitmapFactory.decodeByteArray(
                     stored.iconBytes,
                     0,
                     stored.iconBytes.size
                 )
-
             } catch (_: Exception) {
                 null
             }
@@ -271,11 +275,11 @@ class AppRepository private constructor(
                 componentName = component,
                 lastUpdateTime = stored.lastUpdateTime,
                 initialIcon = bitmap,
-                initialLaunchCount = stored.launchCount
+                initialLaunchCount = stored.launchCount,
+                isSystemApp = isSystemPackageName(stored.packageName)
             )
 
             synchronized(appMap) {
-
                 appMap[stored.packageName] = record
 
                 if (bitmap != null) {
@@ -289,18 +293,14 @@ class AppRepository private constructor(
 
     /**
      * One reconciliation after startup.
-     *
      * Package changes afterwards are handled by LauncherApps.Callback.
      */
     private suspend fun reconcileInstalledApps() {
-
         val activities = try {
-
             launcherApps.getActivityList(
                 null,
                 Process.myUserHandle()
             )
-
         } catch (_: Exception) {
             return
         }
@@ -324,7 +324,6 @@ class AppRepository private constructor(
 
         // Remove stale records from memory.
         synchronized(appMap) {
-
             val stalePackages = appMap.keys
                 .filter { it !in installedPackages }
 
@@ -348,13 +347,8 @@ class AppRepository private constructor(
      * Refresh one package only.
      */
     private fun refreshPackage(packageName: String) {
-
         scope.launch {
-
-
-
             try {
-
                 val activity = launcherApps.getActivityList(
                     packageName,
                     Process.myUserHandle()
@@ -366,9 +360,7 @@ class AppRepository private constructor(
                 }
 
                 refreshActivity(activity)
-
                 publishApps()
-
             } catch (_: Exception) {
                 // Package may temporarily be unavailable.
             }
@@ -381,21 +373,17 @@ class AppRepository private constructor(
     private suspend fun refreshActivity(
         activity: LauncherActivityInfo
     ) {
-
         val packageName = activity.applicationInfo.packageName
-
         val label = activity.label.toString()
-
         val component = activity.componentName
+        val systemApp = isSystemPackage(activity.applicationInfo)
 
         val updateTime = try {
-
             @Suppress("DEPRECATION")
             context.packageManager.getPackageInfo(
                 packageName,
                 0
             ).lastUpdateTime
-
         } catch (_: Exception) {
             0L
         }
@@ -412,25 +400,21 @@ class AppRepository private constructor(
             existing.lastUpdateTime == updateTime &&
             existing.label == label &&
             existing.componentName == component &&
+            existing.isSystemApp == systemApp &&
             existing.icon.value != null
         ) {
             return
         }
 
-
         val bitmap = withContext(Dispatchers.IO) {
-
             try {
-
                 // 1. Try Lawnicons first.
                 val lawnIcon = iconResolver.resolve(component)
 
                 if (lawnIcon != null) {
                     lawnIcon
                 } else {
-
-                    // 2. If Lawnicons has no matching icon,
-                    // reuse the existing cached Android icon when possible.
+                    // 2. Reuse existing cached Android icon when possible.
                     val cached = iconCache.get(packageName)
 
                     if (
@@ -439,7 +423,6 @@ class AppRepository private constructor(
                     ) {
                         cached
                     } else {
-
                         // 3. Final fallback: normal Android app icon.
                         getLauncherDisplayIcon(activity).toBitmap(
                             width = ICON_SIZE,
@@ -448,24 +431,18 @@ class AppRepository private constructor(
                         )
                     }
                 }
-
             } catch (_: Exception) {
                 null
             }
-
         } ?: return
 
-
         val iconBytes = withContext(Dispatchers.IO) {
-
             ByteArrayOutputStream().use { output ->
-
                 bitmap.compress(
                     Bitmap.CompressFormat.PNG,
                     100,
                     output
                 )
-
                 output.toByteArray()
             }
         }
@@ -476,13 +453,12 @@ class AppRepository private constructor(
             componentName = component,
             lastUpdateTime = updateTime,
             initialIcon = bitmap,
-            initialLaunchCount = initialLaunchCount
+            initialLaunchCount = initialLaunchCount,
+            isSystemApp = systemApp
         )
 
         synchronized(appMap) {
-
             appMap[packageName] = record
-
             iconCache.put(packageName, bitmap)
         }
 
@@ -502,18 +478,13 @@ class AppRepository private constructor(
      * Remove an app from memory and database.
      */
     private fun removePackage(packageName: String) {
-
         scope.launch {
-
             synchronized(appMap) {
-
                 appMap.remove(packageName)
-
                 iconCache.remove(packageName)
             }
 
             database.delete(packageName)
-
             publishApps()
         }
     }
@@ -522,9 +493,7 @@ class AppRepository private constructor(
      * Publish apps sorted by most used.
      */
     private fun publishApps() {
-
         val snapshot = synchronized(appMap) {
-
             appMap.values.sortedWith(
                 compareByDescending<AppRecord> {
                     it.launchCount
@@ -541,10 +510,8 @@ class AppRepository private constructor(
      * Launch an app using its cached ComponentName.
      */
     fun launch(app: AppRecord) {
-
         // Update the ranking immediately.
         app.recordLaunch()
-
         publishApps()
 
         // Persist asynchronously.
@@ -553,18 +520,13 @@ class AppRepository private constructor(
         }
 
         val intent = Intent().apply {
-
             component = app.componentName
-
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
 
         try {
-
             context.startActivity(intent)
-
         } catch (_: Exception) {
-
             refreshPackage(app.packageName)
         }
     }

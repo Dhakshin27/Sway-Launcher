@@ -9,6 +9,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import com.me.mylauncher.navigation.LauncherHome
+import com.me.mylauncher.sections.StepTracker
 import com.me.mylauncher.ui.theme.MyLauncherTheme
 
 class MainActivity : ComponentActivity() {
@@ -23,6 +24,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        StepTracker.ensureStarted(this)
+
         enableEdgeToEdge()
 
         window.setSoftInputMode(
@@ -36,6 +39,11 @@ class MainActivity : ComponentActivity() {
         }
 
         requestHomeRole()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        StepTracker.ensureStarted(this)
     }
 
     private fun requestHomeRole() {

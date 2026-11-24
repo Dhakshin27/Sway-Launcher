@@ -60,4 +60,5 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
     implementation(libs.androidsvg.aar)
+    implementation("androidx.lifecycle:lifecycle-process:2.8.7")
 }
