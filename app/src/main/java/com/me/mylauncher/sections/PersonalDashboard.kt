@@ -106,6 +106,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import com.me.mylauncher.data.AppRepository
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.ColorFilter
+import kotlinx.coroutines.flow.asStateFlow
 // ======================================================================
 // CONSTANTS
 // ======================================================================
@@ -118,11 +119,16 @@ private const val WEATHER_TTL_MS = 30 * 60 * 1000L
 private const val LOCATION_TTL_MS = 3 * 60 * 60 * 1000L
 private const val LOCATION_FRESH_MS = 2 * 60 * 60 * 1000L
 
+// ======================================================================
+// STEPS CONSTANTS
+// ======================================================================
+
 private const val STEPS_PREFS = "dashboard_steps_prefs"
 private const val KEY_DAY = "day"
 private const val KEY_BASELINE = "baseline"
 private const val KEY_CARRIED = "carried"
 private const val KEY_LAST = "last"
+private const val KEY_BOOT_COUNT = "boot_count"
 private const val KEY_GOAL = "goal"
 private const val DEFAULT_GOAL = 10_000
 
@@ -967,7 +973,7 @@ private fun searchCities(query: String): List<GeoResult> {
 }
 
 // ======================================================================
-// 1B. STEPS PANE (RIGHT HALF OF TOP CONSOLE)
+// 1B. STEPS PANE & CONTINUOUS HARDWARE TRACKER
 // ======================================================================
 
 private fun hasActivityRecognition(context: Context): Boolean =
@@ -977,37 +983,132 @@ private fun hasActivityRecognition(context: Context): Boolean =
                 Manifest.permission.ACTIVITY_RECOGNITION
             ) == PackageManager.PERMISSION_GRANTED
 
-private fun readStoredSteps(p: SharedPreferences): Int {
-    val baseline = p.getLong(KEY_BASELINE, -1L)
-    if (p.getLong(KEY_DAY, -1L) != todayEpochDay() || baseline < 0) return 0
-    val steps = p.getLong(KEY_CARRIED, 0L) + (p.getLong(KEY_LAST, baseline) - baseline)
-    return steps.coerceAtLeast(0L).toInt()
+private fun getDeviceBootCount(context: Context): Int = try {
+    Settings.Global.getInt(context.contentResolver, Settings.Global.BOOT_COUNT, -1)
+} catch (_: Exception) {
+    -1
 }
 
-private fun applyStepReading(p: SharedPreferences, total: Long): Int {
-    val today = todayEpochDay()
-    var baseline = p.getLong(KEY_BASELINE, -1L)
-    var carried = p.getLong(KEY_CARRIED, 0L)
-    val last = p.getLong(KEY_LAST, -1L)
+/**
+ * Lightweight singleton that keeps TYPE_STEP_COUNTER registered across the
+ * launcher's process lifetime using hardware FIFO batching (zero polling).
+ */
+internal object StepTracker : SensorEventListener {
+    private val _steps = MutableStateFlow(0)
+    val stepsFlow = _steps.asStateFlow()
 
-    if (p.getLong(KEY_DAY, -1L) != today || baseline < 0) {
-        baseline = total
-        carried = 0L
-    } else if (total < last) {
-        carried += (last - baseline).coerceAtLeast(0L)
-        baseline = 0L
+    private var appContext: Context? = null
+    private var sensorManager: SensorManager? = null
+    private var stepSensor: Sensor? = null
+    private var registered = false
+
+    fun ensureStarted(context: Context) {
+        val app = context.applicationContext
+        if (appContext == null) {
+            appContext = app
+            sensorManager = app.getSystemService(SensorManager::class.java)
+            stepSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
+        }
+
+        val prefs = app.getSharedPreferences(STEPS_PREFS, Context.MODE_PRIVATE)
+        _steps.value = computeCurrentSteps(app, prefs, rawTotal = null)
+
+        if (registered || !hasActivityRecognition(app)) return
+        val sensor = stepSensor ?: return
+        val sm = sensorManager ?: return
+
+        // Batch sensor events up to 5 seconds in hardware FIFO to minimize CPU wakeups
+        registered = try {
+            sm.registerListener(
+                this,
+                sensor,
+                SensorManager.SENSOR_DELAY_NORMAL,
+                5_000_000 // 5 seconds maxReportLatencyUs
+            )
+        } catch (_: Exception) {
+            false
+        }
     }
 
-    val steps = (carried + (total - baseline)).coerceAtLeast(0L)
+    fun syncFromStorage(context: Context) {
+        val app = context.applicationContext
+        val prefs = app.getSharedPreferences(STEPS_PREFS, Context.MODE_PRIVATE)
+        _steps.value = computeCurrentSteps(app, prefs, rawTotal = null)
+    }
 
-    p.edit()
-        .putLong(KEY_DAY, today)
-        .putLong(KEY_BASELINE, baseline)
-        .putLong(KEY_CARRIED, carried)
-        .putLong(KEY_LAST, total)
-        .apply()
+    override fun onSensorChanged(event: SensorEvent) {
+        val app = appContext ?: return
+        if (event.values.isEmpty()) return
+        val rawTotal = event.values[0].toLong()
+        val prefs = app.getSharedPreferences(STEPS_PREFS, Context.MODE_PRIVATE)
+        _steps.value = computeCurrentSteps(app, prefs, rawTotal)
+    }
 
-    return steps.toInt()
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+
+    /**
+     * Reconciles daily boundaries, device reboots, and brand-new installs in one pass.
+     */
+    @Synchronized
+    private fun computeCurrentSteps(
+        context: Context,
+        prefs: SharedPreferences,
+        rawTotal: Long?
+    ): Int {
+        val today = todayEpochDay()
+        val currentBoot = getDeviceBootCount(context)
+
+        val savedDay = prefs.getLong(KEY_DAY, -1L)
+        var baseline = prefs.getLong(KEY_BASELINE, -1L)
+        var carried = prefs.getLong(KEY_CARRIED, 0L)
+        val last = prefs.getLong(KEY_LAST, -1L)
+        val savedBoot = prefs.getInt(KEY_BOOT_COUNT, -1)
+
+        // 1. Handle first-ever launch (no prior history exists)
+        if (baseline < 0L || last < 0L) {
+            if (rawTotal == null) return 0
+            prefs.edit()
+                .putLong(KEY_DAY, today)
+                .putLong(KEY_BASELINE, rawTotal)
+                .putLong(KEY_CARRIED, 0L)
+                .putLong(KEY_LAST, rawTotal)
+                .putInt(KEY_BOOT_COUNT, currentBoot)
+                .apply()
+            return 0
+        }
+
+        // 2. Detect reboot (hardware counter reset to 0 since boot)
+        val rebooted = (currentBoot != -1 && savedBoot != -1 && currentBoot != savedBoot) ||
+                (rawTotal != null && rawTotal < last)
+
+        // 3. Handle day rollover BEFORE applying today's post-reboot delta
+        if (savedDay != today) {
+            // Yesterday's final hardware counter value is today's midnight baseline
+            // (unless the device rebooted across midnight, in which case baseline is 0).
+            baseline = if (rebooted) 0L else last
+            carried = 0L
+        } else if (rebooted) {
+            // Rebooted mid-day: bank steps accumulated earlier today before the reboot
+            carried += (last - baseline).coerceAtLeast(0L)
+            baseline = 0L
+        }
+
+        val effectiveTotal = rawTotal ?: if (rebooted) 0L else last
+        val todaySteps = (carried + (effectiveTotal - baseline)).coerceAtLeast(0L)
+
+        // Persist only when state actually changes to keep disk I/O minimal
+        if (rawTotal != null || savedDay != today || rebooted) {
+            prefs.edit()
+                .putLong(KEY_DAY, today)
+                .putLong(KEY_BASELINE, baseline)
+                .putLong(KEY_CARRIED, carried)
+                .putLong(KEY_LAST, effectiveTotal)
+                .putInt(KEY_BOOT_COUNT, currentBoot)
+                .apply()
+        }
+
+        return todaySteps.toInt()
+    }
 }
 
 @Composable
@@ -1023,7 +1124,7 @@ private fun StepsPane(active: Boolean, modifier: Modifier = Modifier) {
 
     var permissionGranted by remember { mutableStateOf(hasActivityRecognition(context)) }
     var permissionDenied by remember { mutableStateOf(false) }
-    var steps by remember { mutableIntStateOf(readStoredSteps(prefs)) }
+    val steps by StepTracker.stepsFlow.collectAsState()
     var goal by remember { mutableIntStateOf(prefs.getInt(KEY_GOAL, DEFAULT_GOAL)) }
     var showGoalDialog by remember { mutableStateOf(false) }
 
@@ -1032,67 +1133,32 @@ private fun StepsPane(active: Boolean, modifier: Modifier = Modifier) {
     ) { granted ->
         permissionGranted = granted
         permissionDenied = !granted
+        if (granted) {
+            StepTracker.ensureStarted(context)
+        }
+    }
+
+    // Start process-wide listener as soon as permission is available (never unregistered on page swipe)
+    LaunchedEffect(permissionGranted) {
+        if (permissionGranted) {
+            StepTracker.ensureStarted(context)
+        }
     }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                permissionGranted = hasActivityRecognition(context)
-                steps = readStoredSteps(prefs)
+                val granted = hasActivityRecognition(context)
+                permissionGranted = granted
+                if (granted) {
+                    StepTracker.ensureStarted(context)
+                } else {
+                    StepTracker.syncFromStorage(context)
+                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-
-    DisposableEffect(lifecycleOwner, active, permissionGranted, sensor) {
-        if (!active || !permissionGranted || sensor == null || sensorManager == null) {
-            return@DisposableEffect onDispose {}
-        }
-
-        val listener = object : SensorEventListener {
-            override fun onSensorChanged(event: SensorEvent) {
-                if (event.values.isNotEmpty()) {
-                    steps = applyStepReading(prefs, event.values[0].toLong())
-                }
-            }
-
-            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
-        }
-
-        var registered = false
-        fun register() {
-            if (!registered) {
-                registered = try {
-                    sensorManager.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_NORMAL)
-                } catch (e: Exception) {
-                    false
-                }
-            }
-        }
-
-        fun unregister() {
-            if (registered) {
-                try {
-                    sensorManager.unregisterListener(listener)
-                } catch (e: Exception) {}
-                registered = false
-            }
-        }
-
-        val observer = LifecycleEventObserver { _, event ->
-            when (event) {
-                Lifecycle.Event.ON_START -> register()
-                Lifecycle.Event.ON_STOP -> unregister()
-                else -> {}
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
-            unregister()
-        }
     }
 
     Column(
@@ -1137,7 +1203,7 @@ private fun StepsPane(active: Boolean, modifier: Modifier = Modifier) {
                                 .setData(Uri.fromParts("package", context.packageName, null))
                                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                         )
-                    } catch (e: Exception) {}
+                    } catch (_: Exception) {}
                 } else {
                     permissionLauncher.launch(Manifest.permission.ACTIVITY_RECOGNITION)
                 }

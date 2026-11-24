@@ -1,5 +1,11 @@
 package com.me.mylauncher.sections
 
+import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
+import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
@@ -14,11 +20,14 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -72,10 +81,12 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -135,9 +146,9 @@ private class Keyed(val app: AppRecord) {
 }
 
 /**
- * Empty query  -> most used first, then alphabetical.
- * With a query -> label prefix matches, then label contains, then package
- *                 matches; most used first inside each group.
+ * - Empty query  -> most used first, then alphabetical.
+ * - With a query -> label prefix matches, then label contains, then package
+ *                   matches; most used first inside each group.
  */
 private fun filterAndSort(apps: List<AppRecord>, query: String): List<AppRecord> {
     val keyed = apps.map(::Keyed)
@@ -189,11 +200,13 @@ fun YourApps(isActive: Boolean = true) {
 
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
+    val haptics = LocalHapticFeedback.current
 
     // Held as a State object and only read inside SearchBar / snapshotFlow, so
     // typing doesn't recompose the pager or the grid.
     val searchQuery = remember { mutableStateOf("") }
     var debouncedQuery by remember { mutableStateOf("") }
+    var menuTargetApp by remember { mutableStateOf<AppRecord?>(null) }
 
     // Debounce typing, but apply clearing instantly.
     LaunchedEffect(Unit) {
@@ -223,10 +236,14 @@ fun YourApps(isActive: Boolean = true) {
         snapshotFlow { pagerState.currentPage }
             .distinctUntilChanged()
             .drop(1)
-            .collect { keyboard?.hide() }
+            .collect {
+                menuTargetApp = null
+                keyboard?.hide()
+            }
     }
     LaunchedEffect(isActive) {
         if (!isActive) {
+            menuTargetApp = null
             focusManager.clearFocus()
             keyboard?.hide()
         }
@@ -236,82 +253,328 @@ fun YourApps(isActive: Boolean = true) {
         { app -> repository.launch(app) }
     }
 
-    CardContainer(
-        backgroundColor = LauncherColors.Background,
-        contentPadding = PaddingValues(
-            horizontal = Dimens.ScreenPaddingH,
-            vertical = Dimens.ScreenPaddingV
-        )
-    ) {
+    val onAppLongPress: (AppRecord) -> Unit = remember(isActive, haptics, keyboard, focusManager) {
+        { app ->
+            if (isActive) {
+                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                keyboard?.hide()
+                focusManager.clearFocus()
+                menuTargetApp = app
+            }
+        }
+    }
 
-        // App grid / empty state takes all available space
-        if (appPages.isNotEmpty()) {
-            HorizontalPager(
-                state = pagerState,
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth(),
-                pageSpacing = Dimens.PageSpacing,
-                userScrollEnabled = isActive,
-                beyondViewportPageCount = 1
-            ) { page ->
-                AppGridPage(
-                    pageApps = appPages[page],
-                    enabled = isActive,
-                    onLaunch = launchApp,
-                    // Subtle depth while swiping. Read in the draw phase only.
-                    modifier = Modifier.graphicsLayer {
-                        val offset = ((pagerState.currentPage - page) +
-                                pagerState.currentPageOffsetFraction)
-                            .absoluteValue
-                            .coerceIn(0f, 1f)
-                        alpha = 1f - 0.45f * offset
-                        val s = 1f - 0.05f * offset
-                        scaleX = s
-                        scaleY = s
-                    }
+    Box(modifier = Modifier.fillMaxSize()) {
+        CardContainer(
+            backgroundColor = LauncherColors.Background,
+            contentPadding = PaddingValues(
+                horizontal = Dimens.ScreenPaddingH,
+                vertical = Dimens.ScreenPaddingV
+            )
+        ) {
+
+            // App grid / empty state takes all available space
+            if (appPages.isNotEmpty()) {
+                HorizontalPager(
+                    state = pagerState,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    pageSpacing = Dimens.PageSpacing,
+                    userScrollEnabled = isActive && menuTargetApp == null,
+                    beyondViewportPageCount = 1
+                ) { page ->
+                    AppGridPage(
+                        pageApps = appPages[page],
+                        enabled = isActive && menuTargetApp == null,
+                        onLaunch = launchApp,
+                        onLongPress = onAppLongPress,
+                        // Subtle depth while swiping. Read in the draw phase only.
+                        modifier = Modifier.graphicsLayer {
+                            val offset = ((pagerState.currentPage - page) +
+                                    pagerState.currentPageOffsetFraction)
+                                .absoluteValue
+                                .coerceIn(0f, 1f)
+                            alpha = 1f - 0.45f * offset
+                            val s = 1f - 0.05f * offset
+                            scaleX = s
+                            scaleY = s
+                        }
+                    )
+                }
+            } else {
+                EmptyState(
+                    message = when {
+                        apps.isEmpty() -> "No apps available"
+                        else -> "No results for “$debouncedQuery”"
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
                 )
             }
-        } else {
-            EmptyState(
-                message = when {
-                    apps.isEmpty() -> "No apps available"
-                    else -> "No results for “$debouncedQuery”"
+
+            // Page indicator (animates in/out as search results change)
+            AnimatedVisibility(
+                visible = appPages.size > 1,
+                enter = fadeIn(tween(180)) + expandVertically(tween(180)),
+                exit = fadeOut(tween(120)) + shrinkVertically(tween(120))
+            ) {
+                Column {
+                    Spacer(Modifier.height(14.dp))
+                    PageIndicator(
+                        pageCount = appPages.size,
+                        pagerState = pagerState
+                    )
+                }
+            }
+
+            // Bottom search bar
+            Spacer(Modifier.height(14.dp))
+
+            SearchBar(
+                query = searchQuery,
+                onSubmit = {
+                    visibleApps.firstOrNull()?.let(launchApp)
+                    keyboard?.hide()
+                    focusManager.clearFocus()
                 },
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
+                modifier = Modifier.graphicsLayer {
+                    translationY = -imeInsets.getBottom(density).toFloat()
+                }
             )
         }
 
-        // Page indicator (animates in/out as search results change)
+        // Long-press action overlay
         AnimatedVisibility(
-            visible = appPages.size > 1,
-            enter = fadeIn(tween(180)) + expandVertically(tween(180)),
-            exit = fadeOut(tween(120)) + shrinkVertically(tween(120))
+            visible = menuTargetApp != null && isActive,
+            enter = fadeIn(tween(160)),
+            exit = fadeOut(tween(120))
         ) {
-            Column {
-                Spacer(Modifier.height(14.dp))
-                PageIndicator(
-                    pageCount = appPages.size,
-                    pagerState = pagerState
+            AppActionSheet(
+                app = menuTargetApp,
+                onAppInfo = { target -> openAppInfo(context, target.packageName) },
+                onUninstall = { target -> requestUninstallApp(context, target) },
+                onDismiss = { menuTargetApp = null }
+            )
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Long-press action sheet
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun AppActionSheet(
+    app: AppRecord?,
+    onAppInfo: (AppRecord) -> Unit,
+    onUninstall: (AppRecord) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val activeApp = app ?: return
+    val bitmap by activeApp.icon.collectAsState()
+    val imageBitmap = remember(bitmap) { bitmap?.asImageBitmap() }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.6f))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onDismiss
+            )
+            .padding(horizontal = Dimens.ScreenPaddingH),
+        contentAlignment = Alignment.BottomCenter
+    ) {
+        AnimatedVisibility(
+            visible = true,
+            enter = slideInVertically(tween(180)) { it / 3 } + fadeIn(tween(180)),
+            exit = slideOutVertically(tween(120)) { it / 3 } + fadeOut(tween(120))
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = Dimens.ScreenPaddingV)
+                    .clip(CardShape)
+                    .background(LauncherColors.Surface)
+                    .border(1.dp, LauncherColors.Border, CardShape)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = {}
+                    )
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (imageBitmap != null) {
+                        Image(
+                            bitmap = imageBitmap,
+                            contentDescription = null,
+                            modifier = Modifier.size(38.dp),
+                            contentScale = ContentScale.Fit,
+                            colorFilter = ColorFilter.tint(
+                                color = LauncherColors.Accent,
+                                blendMode = BlendMode.SrcIn
+                            )
+                        )
+                        Spacer(Modifier.width(12.dp))
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = activeApp.label,
+                            color = LauncherColors.TextPrimary,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = activeApp.packageName,
+                            color = LauncherColors.TextSecondary,
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+
+                ActionRow(
+                    title = "App info",
+                    titleColor = LauncherColors.TextPrimary,
+                    glyph = {
+                        InfoGlyph(
+                            modifier = Modifier.size(18.dp),
+                            color = LauncherColors.Accent
+                        )
+                    },
+                    onClick = {
+                        onDismiss()
+                        onAppInfo(activeApp)
+                    }
                 )
+
+                if (!activeApp.isSystemApp) {
+                    ActionRow(
+                        title = "Uninstall",
+                        titleColor = Color(0xFFFF6B6B),
+                        glyph = {
+                            TrashGlyph(
+                                modifier = Modifier.size(18.dp),
+                                color = Color(0xFFFF6B6B)
+                            )
+                        },
+                        onClick = {
+                            onDismiss()
+                            onUninstall(activeApp)
+                        }
+                    )
+                }
             }
         }
+    }
+}
 
-        // Bottom search bar
-        Spacer(Modifier.height(14.dp))
+@Composable
+private fun ActionRow(
+    title: String,
+    titleColor: Color,
+    glyph: @Composable () -> Unit,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(SearchShape)
+            .background(LauncherColors.Elevated)
+            .border(1.dp, LauncherColors.Border, SearchShape)
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        glyph()
+        Spacer(Modifier.width(12.dp))
+        Text(
+            text = title,
+            color = titleColor,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Medium
+        )
+    }
+}
 
-        SearchBar(
-            query = searchQuery,
-            onSubmit = {
-                visibleApps.firstOrNull()?.let(launchApp)
-                keyboard?.hide()
-                focusManager.clearFocus()
-            },
-            modifier = Modifier.graphicsLayer {
-                translationY = -imeInsets.getBottom(density).toFloat()
-            }
+@Composable
+private fun InfoGlyph(modifier: Modifier, color: Color) {
+    Canvas(modifier) {
+        val stroke = 1.8.dp.toPx()
+        val radius = (size.minDimension - stroke) / 2f
+        val center = Offset(size.width / 2f, size.height / 2f)
+        drawCircle(color = color, radius = radius, center = center, style = Stroke(stroke))
+        drawCircle(
+            color = color,
+            radius = stroke * 0.7f,
+            center = Offset(center.x, center.y - radius * 0.42f)
+        )
+        drawLine(
+            color = color,
+            start = Offset(center.x, center.y - radius * 0.08f),
+            end = Offset(center.x, center.y + radius * 0.48f),
+            strokeWidth = stroke,
+            cap = StrokeCap.Round
+        )
+    }
+}
+
+@Composable
+private fun TrashGlyph(modifier: Modifier, color: Color) {
+    Canvas(modifier) {
+        val stroke = 1.8.dp.toPx()
+        val w = size.width
+        val h = size.height
+        // Lid
+        drawLine(
+            color = color,
+            start = Offset(w * 0.18f, h * 0.28f),
+            end = Offset(w * 0.82f, h * 0.28f),
+            strokeWidth = stroke,
+            cap = StrokeCap.Round
+        )
+        // Handle
+        drawLine(
+            color = color,
+            start = Offset(w * 0.38f, h * 0.16f),
+            end = Offset(w * 0.62f, h * 0.16f),
+            strokeWidth = stroke,
+            cap = StrokeCap.Round
+        )
+        // Bin body
+        drawLine(
+            color = color,
+            start = Offset(w * 0.26f, h * 0.28f),
+            end = Offset(w * 0.32f, h * 0.84f),
+            strokeWidth = stroke,
+            cap = StrokeCap.Round
+        )
+        drawLine(
+            color = color,
+            start = Offset(w * 0.74f, h * 0.28f),
+            end = Offset(w * 0.68f, h * 0.84f),
+            strokeWidth = stroke,
+            cap = StrokeCap.Round
+        )
+        drawLine(
+            color = color,
+            start = Offset(w * 0.32f, h * 0.84f),
+            end = Offset(w * 0.68f, h * 0.84f),
+            strokeWidth = stroke,
+            cap = StrokeCap.Round
         )
     }
 }
@@ -463,6 +726,7 @@ private fun AppGridPage(
     pageApps: List<AppRecord>,
     enabled: Boolean,
     onLaunch: (AppRecord) -> Unit,
+    onLongPress: (AppRecord) -> Unit,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -488,6 +752,7 @@ private fun AppGridPage(
                             app = app,
                             enabled = enabled,
                             onLaunch = onLaunch,
+                            onLongPress = onLongPress,
                             modifier = slotModifier
                         )
                     } else {
@@ -508,6 +773,7 @@ private fun AppCard(
     app: AppRecord,
     enabled: Boolean,
     onLaunch: (AppRecord) -> Unit,
+    onLongPress: (AppRecord) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val bitmap by app.icon.collectAsState()
@@ -526,10 +792,11 @@ private fun AppCard(
             .clip(CardShape)
             .background(LauncherColors.Elevated)
             .border(1.dp, LauncherColors.Border, CardShape)
-            .clickable(
+            .combinedClickable(
                 enabled = enabled,
                 role = Role.Button,
-                onClick = { onLaunch(app) }
+                onClick = { onLaunch(app) },
+                onLongClick = { onLongPress(app) }
             )
             .padding(horizontal = 12.dp, vertical = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -650,4 +917,35 @@ private fun Dot(selected: Boolean) {
             .clip(CircleShape)
             .background(color)
     )
+}
+
+// ---------------------------------------------------------------------------
+// System intents
+// ---------------------------------------------------------------------------
+
+private fun openAppInfo(context: Context, packageName: String) {
+    val intent = Intent(
+        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+        Uri.fromParts("package", packageName, null)
+    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    runCatching { context.startActivity(intent) }
+        .onFailure {
+            Toast.makeText(context, "Unable to open app info", Toast.LENGTH_SHORT).show()
+        }
+}
+
+private fun requestUninstallApp(context: Context, app: AppRecord) {
+    val intent = Intent(
+        Intent.ACTION_DELETE,
+        Uri.fromParts("package", app.packageName, null)
+    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    try {
+        context.startActivity(intent)
+    } catch (_: ActivityNotFoundException) {
+        Toast.makeText(
+            context,
+            "${app.label} cannot be uninstalled",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
 }
